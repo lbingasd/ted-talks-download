@@ -46,7 +46,14 @@ try:
     import sys
     import time
     import urllib
-    import urllib2
+    try:
+        # Python 3 compatibility: make urllib2.urlopen and urlretrieve available
+        import urllib.request as urllib2
+        import urllib.request as urllib_request
+    except ImportError:
+        # Python 2
+        import urllib2
+        import urllib as urllib_request
     from argparse import ArgumentParser
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -58,6 +65,10 @@ except ImportError:
     print((os.linesep * 2).join(["An error found importing one module:",
           str(sys.exc_info()[1]), "You need to install it", "Stopping..."]))
     sys.exit(-2)
+
+# Default FOUND to False so code running on Windows doesn't raise NameError.
+# On POSIX, __main__ may override this with a proper check for 'wget'.
+FOUND = False
 
 
 class Logger():
@@ -242,6 +253,19 @@ class Logger():
         # Disconnect from server
         server.quit()
 
+    def log(self, message, print_console=True):
+        """Log a short status message and optionally print it to console."""
+        # Ensure it's a string
+        if isinstance(message, (list, tuple)):
+            message = os.linesep.join([str(m) for m in message])
+        else:
+            message = str(message)
+        # Add to internal log
+        self.free(message)
+        # Also print to console if requested
+        if print_console:
+            print(message)
+
     def write(self, append=False):
         """Write the log to a file.
 
@@ -254,8 +278,9 @@ class Logger():
         (boolean) append -- If true appends log to file, else writes a new one
 
         """
-        mode = 'ab' if append else 'wb'
-        with open(self.filename, mode) as log_file:
+        # Use text mode with UTF-8 encoding on Python 3 to write str
+        mode = 'a' if append else 'w'
+        with open(self.filename, mode, encoding='utf-8') as log_file:
             log_file.write(self.__log)
 
 
@@ -373,10 +398,18 @@ def get_sub(tt_id, tt_intro, sub):
                             "".format(os.linesep,
                                       json_object['status']['message'],
                                       sub))
+                try:
+                    log.log(sub_log)
+                except NameError:
+                    pass
 
         except ValueError:
             sub_log += ("Subtitle '{0}' it's a malformed json file.{1}".
                         format(sub, os.linesep))
+            try:
+                log.log(sub_log)
+            except NameError:
+                pass
     return srt_content, sub_log
 
 
@@ -390,6 +423,10 @@ def check_subs(ttalk, v_name):
                                                                   'spa'))
             if s_name not in glob.glob('*.srt'))
     s_log = ''
+    try:
+        log.log("Checking subtitles for {0}".format(v_name))
+    except NameError:
+        pass
     for sub in subs:
         # Reads the talk web page, to search the talk's intro duration
         if FOUND:
@@ -398,24 +435,64 @@ def check_subs(ttalk, v_name):
                                stdout=PIPE).stdout.read()
         else:
             tt_webpage = urllib2.urlopen(ttalk.feedburner_origlink).read()
-        regex = re.compile('"introDuration":(\d+\.?\d+),')
+            regex = re.compile(r'"introDuration":(\d+\.?\d+),')
         tt_intro = (float(regex.findall(tt_webpage)[0]) + 1) * 1000
         subtitle, get_log = get_sub(ttalk.id.split(':')[-1], tt_intro, sub)
         s_log += get_log
         if subtitle:
             with open(sub, 'w') as srt_file:
                 srt_file.write(subtitle)
-            s_log += "{0}{1} downloaded.{0}".format(os.linesep, sub)
+                s_log += "{0}{1} downloaded.{0}".format(os.linesep, sub)
+                try:
+                    log.log("Subtitle '{0}' downloaded.".format(sub))
+                except NameError:
+                    pass
     return s_log
 
 
 def get_video(ttk, vid_url, vid_name):
     """Gets the TED Talk video."""
+    try:
+        log.log("Downloading video: {0} from {1}".format(vid_name, vid_url))
+    except NameError:
+        pass
+
+    success = False
+    # Try wget on POSIX systems when available
     if FOUND:
-        Popen(['wget', '-q', '-O', vid_name, vid_url],
-              stdout=PIPE).stdout.read()
+        proc = Popen(['wget', '-q', '-O', vid_name, vid_url], stdout=PIPE, stderr=PIPE)
+        out, err = proc.communicate()
+        rc = proc.returncode
+        if rc == 0 and os.path.exists(vid_name):
+            success = True
+        else:
+            err_msg = ''
+            try:
+                err_msg = err.decode('utf-8', errors='ignore') if isinstance(err, bytes) else str(err)
+            except Exception:
+                err_msg = str(err)
+            try:
+                log.log("wget failed (rc={0}): {1}".format(rc, err_msg))
+            except NameError:
+                pass
     else:
-        urllib.urlretrieve(vid_url, vid_name)
+        # Use urllib as a fallback and capture exceptions
+        try:
+            urllib_request.urlretrieve(vid_url, vid_name)
+            if os.path.exists(vid_name):
+                success = True
+        except Exception as e:
+            try:
+                log.log("urlretrieve failed: {0}".format(e))
+            except NameError:
+                pass
+
+    if not success:
+        try:
+            log.log("Failed to download video: {0} from {1}".format(vid_name, vid_url))
+        except NameError:
+            pass
+        return ''
     v_log = u'{0} ({1})\n'.format(ttk.subtitle, ttk.itunes_duration)
     v_log += u'{0}\n\n'.format('=' * (len(ttk.subtitle) + 11))
     v_log += u'{0}\n\n'.format(ttk.feedburner_origlink)
@@ -435,6 +512,8 @@ def main():
 
     # initalize the log
     log = Logger()
+    # expose module-level `log` so helper functions can report status
+    globals()['log'] = log
 
     # log the header
     url = 'http://joedicastro.com'
@@ -459,6 +538,7 @@ def main():
 
     # The TED Talks HD RSS feed
     ttalk_feed_url = 'http://feeds.feedburner.com/tedtalksHD'
+    #http://feeds.feedburner.com/tedtalks_video
     ttalk_feed = feedparser.parse(ttalk_feed_url)
 
     # If the feed is erroneous or occurs a http or network error, log and exit!
@@ -471,17 +551,64 @@ def main():
     # If correct, process the feed entries
     vids_log, subs_log = '', ''
     for ttalk_entrie in ttalk_feed.entries:
+        try:
+            log.log("Processing talk: {0}".format(getattr(ttalk_entrie, 'title',
+                                                      ttalk_entrie.id)))
+        except NameError:
+            pass
         # Get The video url and name
         tt_vid_url = ttalk_entrie.media_content[0]['url']
         tt_vid_name = tt_vid_url.split('/')[-1].split('?')[0]
         # If the video is new, download it!
         if ttalk_entrie.published_parsed > last and tt_vid_name not in videos:
+            log.log("New video found: {0}".format(tt_vid_name))
             vids_log += get_video(ttalk_entrie, tt_vid_url, tt_vid_name)
-            videos.append(tt_vid_name)
-            video_dates.append(ttalk_entrie.published_parsed)
-        # If video is already downloaded, check if subs exists, if not, get it!
-        if tt_vid_name in videos:
+            # Only mark as downloaded if the file actually exists
+            if os.path.exists(tt_vid_name):
+                videos.append(tt_vid_name)
+                video_dates.append(ttalk_entrie.published_parsed)
+            else:
+                log.log("Failed to download video (file missing): {0}".
+                        format(os.path.abspath(tt_vid_name)))
+        # If video is recorded and the file exists, check subs
+        if tt_vid_name in videos and os.path.exists(tt_vid_name):
+            log.log("Checking subtitles for {0}".format(tt_vid_name))
             subs_log += check_subs(ttalk_entrie, tt_vid_name)
+        else:
+            # Determine why we're skipping and log a precise message
+            abs_path = os.path.abspath(tt_vid_name)
+            if tt_vid_name in videos:
+                # Listed as downloaded but file doesn't exist on disk
+                if not os.path.exists(tt_vid_name):
+                    log.log("Recorded as downloaded but missing: {0}. Attempting re-download.".format(abs_path))
+                    vids_log += get_video(ttalk_entrie, tt_vid_url, tt_vid_name)
+                    if os.path.exists(tt_vid_name):
+                        log.log("Re-download succeeded: {0}".format(abs_path))
+                        video_dates.append(ttalk_entrie.published_parsed)
+                    else:
+                        log.log("Re-download failed for: {0}".format(abs_path))
+                else:
+                    # Shouldn't get here because earlier branch handles existing files, but include for clarity
+                    log.log("Already downloaded and present: {0}".format(abs_path))
+            else:
+                # Not listed in videos. If the file is missing on disk, try to download it
+                # even if it's older than the last run (repair missing files).
+                if not os.path.exists(tt_vid_name):
+                    reason = "older than last run" if ttalk_entrie.published_parsed <= last else "unknown"
+                    log.log("MP4 missing and not recorded: {0} -- reason: {1}. Attempting download.".
+                            format(abs_path, reason))
+                    vids_log += get_video(ttalk_entrie, tt_vid_url, tt_vid_name)
+                    if os.path.exists(tt_vid_name):
+                        log.log("Download succeeded for missing file: {0}".format(abs_path))
+                        videos.append(tt_vid_name)
+                        video_dates.append(ttalk_entrie.published_parsed)
+                    else:
+                        log.log("Download failed for missing file: {0}".format(abs_path))
+                else:
+                    # File exists on disk but not in recorded list (shouldn't normally happen)
+                    exists = True
+                    log.log("Skipping talk (not downloaded): {0} -- reason: older than last run -- file exists: {1}".
+                            format(abs_path, exists))
     log.list('Talks downloaded', vids_log)
     log.list('Subs downloaded', [subs_log])
 

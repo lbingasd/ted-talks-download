@@ -40,13 +40,28 @@ try:
     import re
     import sys
     import urllib
-    import urllib2
+    try:
+        # Python 3 compatibility: provide urllib2.urlopen and urlretrieve
+        import urllib.request as urllib2
+        import urllib.request as urllib_request
+    except ImportError:
+        # Python 2
+        import urllib2
+        import urllib as urllib_request
     from subprocess import Popen, PIPE
 except ImportError:
     # Checks the installation of the necessary python modules
     print((os.linesep * 2).join(["An error found importing one module:",
           str(sys.exc_info()[1]), "You need to install it", "Stopping..."]))
     sys.exit(-2)
+
+
+def _show(msg):
+    """Helper to print and/or log a message if a global `log` exists."""
+    try:
+        log.log(msg)
+    except NameError:
+        print(msg)
 
 
 def options():
@@ -113,7 +128,7 @@ def get_sub(tt_id, tt_intro, sub):
                 if line.find('captions') == -1 and line.find('status') == -1:
                     json_file.remove(line)
         else:
-            print("Subtitle '{0}' not found.".format(sub))
+            _show("Subtitle '{0}' not found.".format(sub))
     else:
         json_file = urllib2.urlopen(sub_url).readlines()
     if json_file:
@@ -122,7 +137,7 @@ def get_sub(tt_id, tt_intro, sub):
             if 'captions' in json_object:
                 caption_idx = 1
                 if not json_object['captions']:
-                    print("Subtitle '{0}' not available.".format(sub))
+                    _show("Subtitle '{0}' not available.".format(sub))
                 for caption in json_object['captions']:
                     start = tt_intro + caption['startTime']
                     end = start + caption['duration']
@@ -135,13 +150,13 @@ def get_sub(tt_id, tt_intro, sub):
                                               '\n'])
                     caption_idx += 1
             elif 'status' in json_object:
-                print("This is an error message returned by TED:{0}{0} - "
+                _show("This is an error message returned by TED:{0}{0} - "
                       "{1}{0}{0}Probably because the subtitle '{2}' is not "
                       "available.{0}".format(os.linesep,
                                              json_object['status']['message'],
                                              sub))
         except ValueError:
-            print("Subtitle '{0}' it's a malformed json file.".format(sub))
+            _show("Subtitle '{0}' it's a malformed json file.".format(sub))
     return srt_content
 
 
@@ -157,19 +172,19 @@ def check_subs(tt_id, tt_intro, tt_video):
         if subtitle:
             with open(sub, 'w') as srt_file:
                 srt_file.write(subtitle)
-            print("Subtitle '{0}' downloaded.".format(sub))
+                _show("Subtitle '{0}' downloaded.".format(sub))
     return
 
 
 def get_video(vid_name, vid_url):
     """Gets the TED Talk video."""
-    print("Donwloading video...")
+    _show("Donwloading video...")
     if FOUND:
         Popen(['wget', '-q', '-O', vid_name, vid_url],
               stdout=PIPE).stdout.read()
     else:
-        urllib.urlretrieve(vid_url, vid_name)
-    print("Video {0} downloaded.".format(vid_name))
+        urllib_request.urlretrieve(vid_url, vid_name)
+    _show("Video {0} downloaded.".format(vid_name))
     return
 
 
@@ -179,10 +194,10 @@ def main():
     (opts, args) = options().parse_args()
 
     # regex expressions to search into the webpage
-    regex_intro = re.compile('"introDuration":(\d+\.?\d+),')
-    regex_id = re.compile('"id":(\d+),')
-    regex_url = re.compile('"nativeDownloads":.*"high":"(.+)\?.+},"sub')
-    regex_vid = re.compile('http://.+\/(.*\.mp4)')
+    regex_intro = re.compile(r'"introDuration":(\d+\.?\d+),')
+    regex_id = re.compile(r'"id":(\d+),')
+    regex_url = re.compile(r'"nativeDownloads":.*"high":"(.+)\?.+},"sub')
+    regex_vid = re.compile(r'http://.+\/(.*\.mp4)')
 
     if not args:
         options().print_help()
@@ -206,10 +221,10 @@ def main():
                 ttalk_url = regex_url.findall(ttalk_webpage)[0]
                 ttalk_vid = regex_vid.findall(ttalk_url)[0]
             except IndexError:
-                print('Maybe this video is not available for download.')
+                _show('Maybe this video is not available for download.')
                 sys.exit(1)
         else:
-            print("Are you sure this is the right URL?")
+            _show("Are you sure this is the right URL?")
             sys.exit(1)
         # Get subs (and video)
         check_subs(ttalk_id, ttalk_intro, ttalk_vid)
